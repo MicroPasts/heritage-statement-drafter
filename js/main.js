@@ -1,3 +1,4 @@
+import { initMvpOverlayAndTour } from './ui/onboarding.js';
 import { SAMPLE_SITES, HERITAGE_LAYERS } from './config/services.js';
 import { geocodeQuery } from './intake/geocoder.js';
 import { screenSiteDirectly, normalizeAssetMeta } from './intake/arcgisClient.js';
@@ -717,128 +718,221 @@ document.getElementById('export-md-btn').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
-document.getElementById('export-pdf-btn').addEventListener('click', async () => {
+document.getElementById('export-pdf-btn').addEventListener('click', () => {
   const md = assembleFullMarkdown();
   if (!md) return alert('Draft at least one section before exporting.');
 
-  const sourceEl = document.getElementById('statement-preview');
-  const exportBtn = document.getElementById('export-pdf-btn');
-  const originalLabel = exportBtn.textContent;
-  exportBtn.disabled = true;
-  exportBtn.textContent = 'Building PDF...';
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
 
-  // Build an unclipped, print-styled clone so html2canvas renders crisp spacing
-  const wrapper = document.createElement('div');
-  wrapper.style.position = 'fixed';
-  wrapper.style.left = '-10000px';
-  wrapper.style.top = '0';
-  wrapper.style.width = '180mm';
-  wrapper.style.backgroundColor = '#ffffff';
-  wrapper.style.color = '#0f172a';
-  wrapper.style.fontFamily = 'Arial, Helvetica, sans-serif';
-  wrapper.style.fontSize = '10.5pt';
-  wrapper.style.lineHeight = '1.55';
-  wrapper.style.letterSpacing = '0.015em';
-  wrapper.style.wordSpacing = '0.04em';
-  wrapper.style.fontVariantLigatures = 'none';
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 16;
+  const maxWidth = pageWidth - margin * 2;
+  let y = margin;
 
-  const styleBlock = document.createElement('style');
-  styleBlock.textContent = `
-    .pdf-print-body * {
-      font-family: Arial, Helvetica, sans-serif !important;
-      letter-spacing: 0.015em !important;
-      word-spacing: 0.04em !important;
-      font-variant-ligatures: none !important;
-      box-sizing: border-box;
+  const ensureSpace = (neededMm) => {
+    if (y + neededMm > pageHeight - margin) {
+      doc.addPage();
+      y = margin;
     }
-    .pdf-print-body h1 {
-      font-size: 16pt;
-      font-weight: 700;
-      margin: 0 0 8pt 0;
-      color: #0f172a;
-    }
-    .pdf-print-body h2 {
-      font-size: 12.5pt;
-      font-weight: 700;
-      margin: 14pt 0 6pt 0;
-      padding-bottom: 3pt;
-      border-bottom: 1px solid #cbd5e1;
-      color: #0f172a;
-      page-break-after: avoid;
-      break-after: avoid;
-    }
-    .pdf-print-body h3 {
-      font-size: 11pt;
-      font-weight: 700;
-      margin: 10pt 0 4pt 0;
-      color: #1e293b;
-      page-break-after: avoid;
-      break-after: avoid;
-    }
-    .pdf-print-body p, .pdf-print-body li {
-      font-size: 10pt;
-      line-height: 1.55;
-      margin: 0 0 6pt 0;
-      color: #1e293b;
-      page-break-inside: avoid;
-      break-inside: avoid;
-    }
-    .pdf-print-body ul, .pdf-print-body ol {
-      margin: 0 0 8pt 16pt;
-      padding: 0;
-    }
-    .pdf-print-body hr {
-      border: 0;
-      border-top: 1px solid #e2e8f0;
-      margin: 10pt 0;
-    }
-    .pdf-print-body code {
-      font-family: "Courier New", Courier, monospace !important;
-      font-size: 9pt;
-      background: #f1f5f9;
-      padding: 1pt 3pt;
-      border-radius: 2pt;
-    }
-  `;
+  };
 
-  const contentClone = document.createElement('div');
-  contentClone.className = 'pdf-print-body';
-  contentClone.innerHTML = sourceEl.innerHTML;
+  const stripInlineMd = (text) =>
+    text
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/`(.*?)`/g, '$1')
+      .trim();
 
-  wrapper.appendChild(styleBlock);
-  wrapper.appendChild(contentClone);
-  document.body.appendChild(wrapper);
+  const writeWrapped = (text, { fontSize = 10, fontStyle = 'normal', color = [30, 41, 59], indent = 0, lineHeight = 5, spaceAfter = 2.5 } = {}) => {
+    const clean = stripInlineMd(text);
+    if (!clean) return;
+    doc.setFont('helvetica', fontStyle);
+    doc.setFontSize(fontSize);
+    doc.setTextColor(...color);
 
-  try {
-    await window
-      .html2pdf()
-      .set({
-        margin: [15, 15, 15, 15],
-        filename: `heritage-statement-${Date.now()}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: {
-          scale: 2,
-          useCORS: true,
-          letterRendering: true,
-          backgroundColor: '#ffffff',
-        },
-        jsPDF: {
-          unit: 'mm',
-          format: 'a4',
-          orientation: 'portrait',
-        },
-        pagebreak: {
-          mode: ['css', 'legacy'],
-          avoid: ['h2', 'h3', 'p', 'li', 'blockquote'],
-        },
-      })
-      .from(contentClone)
-      .save();
-  } finally {
-    document.body.removeChild(wrapper);
-    exportBtn.disabled = false;
-    exportBtn.textContent = originalLabel;
+    const lines = doc.splitTextToSize(clean, maxWidth - indent);
+    for (const line of lines) {
+      ensureSpace(lineHeight);
+      doc.text(line, margin + indent, y);
+      y += lineHeight;
+    }
+    y += spaceAfter;
+  };
+
+  const rawLines = md.split('\n');
+  let i = 0;
+
+  while (i < rawLines.length) {
+    const line = rawLines[i].trim();
+
+    if (!line) {
+      y += 1.5;
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^---+$/.test(line)) {
+      ensureSpace(5);
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.3);
+      doc.line(margin, y, pageWidth - margin, y);
+      y += 4;
+      i++;
+      continue;
+    }
+
+    // Markdown pipe table block
+    if (line.startsWith('|')) {
+      const tableLines = [];
+      while (i < rawLines.length && rawLines[i].trim().startsWith('|')) {
+        tableLines.push(rawLines[i].trim());
+        i++;
+      }
+
+      const parsedRows = tableLines
+        .filter((r) => !/^\|[\s:-]+\|/.test(r)) // skip |---|---| separator row
+        .map((r) =>
+          r
+            .replace(/^\|/, '')
+            .replace(/\|$/, '')
+            .split('|')
+            .map((cell) => stripInlineMd(cell))
+        );
+
+      if (parsedRows.length > 0) {
+        const [headRow, ...bodyRows] = parsedRows;
+        doc.autoTable({
+          startY: y,
+          head: bodyRows.length > 0 ? [headRow] : undefined,
+          body: bodyRows.length > 0 ? bodyRows : [headRow],
+          margin: { left: margin, right: margin },
+          styles: {
+            font: 'helvetica',
+            fontSize: 8.5,
+            cellPadding: 2,
+            textColor: [30, 41, 59],
+            lineColor: [203, 213, 225],
+            lineWidth: 0.2,
+          },
+          headStyles: {
+            fillColor: [15, 23, 42],
+            textColor: [255, 255, 255],
+            fontStyle: 'bold',
+          },
+          alternateRowStyles: {
+            fillColor: [248, 250, 252],
+          },
+        });
+        y = doc.lastAutoTable.finalY + 5;
+      }
+      continue;
+    }
+
+    // Headings
+    if (line.startsWith('# ')) {
+      y += 1;
+      writeWrapped(line.slice(2), {
+        fontSize: 16,
+        fontStyle: 'bold',
+        color: [15, 23, 42],
+        lineHeight: 7,
+        spaceAfter: 3,
+      });
+      i++;
+      continue;
+    }
+
+    if (line.startsWith('## ')) {
+      y += 3;
+      ensureSpace(12);
+      writeWrapped(line.slice(3), {
+        fontSize: 12.5,
+        fontStyle: 'bold',
+        color: [15, 23, 42],
+        lineHeight: 6,
+        spaceAfter: 1.5,
+      });
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.3);
+      doc.line(margin, y - 1, pageWidth - margin, y - 1);
+      y += 2.5;
+      i++;
+      continue;
+    }
+
+    if (line.startsWith('### ')) {
+      y += 2;
+      ensureSpace(10);
+      writeWrapped(line.slice(4), {
+        fontSize: 10.5,
+        fontStyle: 'bold',
+        color: [30, 41, 59],
+        lineHeight: 5.5,
+        spaceAfter: 2,
+      });
+      i++;
+      continue;
+    }
+
+    // Bullet points
+    if (/^[-*•]\s+/.test(line)) {
+      const bulletText = line.replace(/^[-*•]\s+/, '');
+      ensureSpace(5);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.text('•', margin + 1.5, y);
+      writeWrapped(bulletText, {
+        fontSize: 9.5,
+        indent: 5,
+        lineHeight: 4.8,
+        spaceAfter: 1.5,
+      });
+      i++;
+      continue;
+    }
+
+    // Blockquotes
+    if (line.startsWith('>')) {
+      writeWrapped(line.replace(/^>\s*/, ''), {
+        fontSize: 9,
+        fontStyle: 'italic',
+        color: [71, 85, 105],
+        indent: 4,
+        lineHeight: 4.6,
+        spaceAfter: 2,
+      });
+      i++;
+      continue;
+    }
+
+    // Standard paragraph
+    writeWrapped(line, {
+      fontSize: 9.5,
+      lineHeight: 4.8,
+      spaceAfter: 2.5,
+    });
+    i++;
   }
+
+  // Add subtle page numbering footer on every page
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(148, 163, 184);
+    doc.text(
+      `Desk-Based Heritage Statement · Page ${p} of ${totalPages}`,
+      pageWidth - margin,
+      pageHeight - 8,
+      { align: 'right' }
+    );
+  }
+
+  doc.save(`heritage-statement-${Date.now()}.pdf`);
 });
 
 document.getElementById('export-geojson-btn').addEventListener('click', () => {
@@ -868,6 +962,7 @@ document.getElementById('export-geojson-btn').addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // Initialize Studio
 // ---------------------------------------------------------------------------
+initMvpOverlayAndTour();
 renderSectionCards();
 syncProviderUI(false);
 miniMap.once('load', async () => {
