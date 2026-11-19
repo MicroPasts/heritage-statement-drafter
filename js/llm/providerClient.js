@@ -208,7 +208,7 @@ async function streamClaude({ endpoint, apiKey, model, systemPrompt, userPrompt,
     signal,
     body: JSON.stringify({
       model,
-      max_tokens: 1800,
+      max_tokens: 4096,
       temperature: 0.2,
       stream: true,
       system: systemPrompt,
@@ -218,12 +218,29 @@ async function streamClaude({ endpoint, apiKey, model, systemPrompt, userPrompt,
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Claude HTTP ${res.status}: ${errText.slice(0, 120)}`);
+    throw new Error(`Claude HTTP ${res.status}: ${errText.slice(0, 160)}`);
   }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let stopReason = null;
+
+  const processEventBlock = (ev) => {
+    const dataLine = ev.split('\n').find((l) => l.startsWith('data: '));
+    if (!dataLine) return;
+    const str = dataLine.slice(6).trim();
+    if (!str || str === '[DONE]') return;
+
+    const parsed = JSON.parse(str);
+    if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+      onToken(parsed.delta.text);
+    } else if (parsed.type === 'message_delta' && parsed.delta?.stop_reason) {
+      stopReason = parsed.delta.stop_reason;
+    } else if (parsed.type === 'error') {
+      throw new Error(parsed.error?.message || 'Claude stream error');
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -232,15 +249,17 @@ async function streamClaude({ endpoint, apiKey, model, systemPrompt, userPrompt,
     const events = buf.split('\n\n');
     buf = events.pop() || '';
     for (const ev of events) {
-      const dataLine = ev.split('\n').find((l) => l.startsWith('data: '));
-      if (!dataLine) continue;
-      const str = dataLine.slice(6).trim();
-      if (str === '[DONE]') return;
-      const parsed = JSON.parse(str);
-      if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-        onToken(parsed.delta.text);
-      }
+      processEventBlock(ev);
     }
+  }
+
+  // Flush any remaining event in buffer after stream EOF
+  if (buf.trim()) {
+    processEventBlock(buf);
+  }
+
+  if (stopReason === 'max_tokens') {
+    onToken('\n\n> *[Note: Section reached token limit — click Regenerate Section if additional detail is required.]*');
   }
 }
 

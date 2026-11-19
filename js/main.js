@@ -717,20 +717,128 @@ document.getElementById('export-md-btn').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
-document.getElementById('export-pdf-btn').addEventListener('click', () => {
+document.getElementById('export-pdf-btn').addEventListener('click', async () => {
   const md = assembleFullMarkdown();
   if (!md) return alert('Draft at least one section before exporting.');
-  const el = document.getElementById('statement-preview');
-  window
-    .html2pdf()
-    .set({
-      margin: [14, 14, 14, 14],
-      filename: `heritage-statement-${Date.now()}.pdf`,
-      html2canvas: { scale: 2 },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-    })
-    .from(el)
-    .save();
+
+  const sourceEl = document.getElementById('statement-preview');
+  const exportBtn = document.getElementById('export-pdf-btn');
+  const originalLabel = exportBtn.textContent;
+  exportBtn.disabled = true;
+  exportBtn.textContent = 'Building PDF...';
+
+  // Build an unclipped, print-styled clone so html2canvas renders crisp spacing
+  const wrapper = document.createElement('div');
+  wrapper.style.position = 'fixed';
+  wrapper.style.left = '-10000px';
+  wrapper.style.top = '0';
+  wrapper.style.width = '180mm';
+  wrapper.style.backgroundColor = '#ffffff';
+  wrapper.style.color = '#0f172a';
+  wrapper.style.fontFamily = 'Arial, Helvetica, sans-serif';
+  wrapper.style.fontSize = '10.5pt';
+  wrapper.style.lineHeight = '1.55';
+  wrapper.style.letterSpacing = '0.015em';
+  wrapper.style.wordSpacing = '0.04em';
+  wrapper.style.fontVariantLigatures = 'none';
+
+  const styleBlock = document.createElement('style');
+  styleBlock.textContent = `
+    .pdf-print-body * {
+      font-family: Arial, Helvetica, sans-serif !important;
+      letter-spacing: 0.015em !important;
+      word-spacing: 0.04em !important;
+      font-variant-ligatures: none !important;
+      box-sizing: border-box;
+    }
+    .pdf-print-body h1 {
+      font-size: 16pt;
+      font-weight: 700;
+      margin: 0 0 8pt 0;
+      color: #0f172a;
+    }
+    .pdf-print-body h2 {
+      font-size: 12.5pt;
+      font-weight: 700;
+      margin: 14pt 0 6pt 0;
+      padding-bottom: 3pt;
+      border-bottom: 1px solid #cbd5e1;
+      color: #0f172a;
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+    .pdf-print-body h3 {
+      font-size: 11pt;
+      font-weight: 700;
+      margin: 10pt 0 4pt 0;
+      color: #1e293b;
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+    .pdf-print-body p, .pdf-print-body li {
+      font-size: 10pt;
+      line-height: 1.55;
+      margin: 0 0 6pt 0;
+      color: #1e293b;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .pdf-print-body ul, .pdf-print-body ol {
+      margin: 0 0 8pt 16pt;
+      padding: 0;
+    }
+    .pdf-print-body hr {
+      border: 0;
+      border-top: 1px solid #e2e8f0;
+      margin: 10pt 0;
+    }
+    .pdf-print-body code {
+      font-family: "Courier New", Courier, monospace !important;
+      font-size: 9pt;
+      background: #f1f5f9;
+      padding: 1pt 3pt;
+      border-radius: 2pt;
+    }
+  `;
+
+  const contentClone = document.createElement('div');
+  contentClone.className = 'pdf-print-body';
+  contentClone.innerHTML = sourceEl.innerHTML;
+
+  wrapper.appendChild(styleBlock);
+  wrapper.appendChild(contentClone);
+  document.body.appendChild(wrapper);
+
+  try {
+    await window
+      .html2pdf()
+      .set({
+        margin: [15, 15, 15, 15],
+        filename: `heritage-statement-${Date.now()}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          letterRendering: true,
+          backgroundColor: '#ffffff',
+        },
+        jsPDF: {
+          unit: 'mm',
+          format: 'a4',
+          orientation: 'portrait',
+        },
+        pagebreak: {
+          mode: ['css', 'legacy'],
+          avoid: ['h2', 'h3', 'p', 'li', 'blockquote'],
+        },
+      })
+      .from(contentClone)
+      .save();
+  } finally {
+    document.body.removeChild(wrapper);
+    exportBtn.disabled = false;
+    exportBtn.textContent = originalLabel;
+  }
 });
 
 document.getElementById('export-geojson-btn').addEventListener('click', () => {
