@@ -29,7 +29,7 @@ const SYSTEM_GROUNDING_RULES = [
   '- Rely EXCLUSIVELY on the JSON evidence provided. NEVER invent List Entry numbers, dates, asset names, or historical claims.',
   '- Cite exact List Entry numbers (e.g. List Entry 1011234), designation grades, and distances in metres from the JSON.',
   '- Apply current English planning policy principles under the National Planning Policy Framework (NPPF, August 2026) and Historic England Good Practice Advice in Planning Note 3 (GPA3: The Setting of Heritage Assets). Do not cite obsolete pre-2026 NPPF paragraph numbers.',
-  '- Write in clear, authoritative British English planning prose using Markdown subheadings and bullet points where helpful.',
+  '- Keep each section focused and concise (300–450 words) in authoritative British English planning prose using Markdown subheadings and bullet points where helpful.',
 ].join('\n');
 
 export function buildGroundedContext(screeningData, proposal) {

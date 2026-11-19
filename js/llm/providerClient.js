@@ -208,7 +208,7 @@ async function streamClaude({ endpoint, apiKey, model, systemPrompt, userPrompt,
     signal,
     body: JSON.stringify({
       model,
-      max_tokens: 4096,
+      max_tokens: 8192,
       temperature: 0.2,
       stream: true,
       system: systemPrompt,
@@ -226,13 +226,13 @@ async function streamClaude({ endpoint, apiKey, model, systemPrompt, userPrompt,
   let buf = '';
   let stopReason = null;
 
-  const processEventBlock = (ev) => {
-    const dataLine = ev.split('\n').find((l) => l.startsWith('data: '));
-    if (!dataLine) return;
-    const str = dataLine.slice(6).trim();
-    if (!str || str === '[DONE]') return;
+  const handleLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
 
-    const parsed = JSON.parse(str);
+    const parsed = JSON.parse(payload);
     if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
       onToken(parsed.delta.text);
     } else if (parsed.type === 'message_delta' && parsed.delta?.stop_reason) {
@@ -246,20 +246,19 @@ async function streamClaude({ endpoint, apiKey, model, systemPrompt, userPrompt,
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-    const events = buf.split('\n\n');
-    buf = events.pop() || '';
-    for (const ev of events) {
-      processEventBlock(ev);
+    const lines = buf.split('\n');
+    buf = lines.pop() || '';
+    for (const line of lines) {
+      handleLine(line);
     }
   }
 
-  // Flush any remaining event in buffer after stream EOF
   if (buf.trim()) {
-    processEventBlock(buf);
+    handleLine(buf);
   }
 
   if (stopReason === 'max_tokens') {
-    onToken('\n\n> *[Note: Section reached token limit — click Regenerate Section if additional detail is required.]*');
+    onToken('\n\n> *[Note: Output reached max_tokens — click Regenerate Section if needed.]*');
   }
 }
 
