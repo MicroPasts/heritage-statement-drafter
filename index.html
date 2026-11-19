@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Heritage Statement Drafter — NPPF &amp; GPA3 Studio</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/@turf/turf@7.1.0/turf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    .prose-brief h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-top: 1.25rem;
+      margin-bottom: 0.5rem;
+      padding-bottom: 0.25rem;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .prose-brief h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: #1e293b;
+      margin-top: 0.9rem;
+      margin-bottom: 0.35rem;
+    }
+    .prose-brief p {
+      margin-bottom: 0.65rem;
+      line-height: 1.65;
+    }
+    .prose-brief ul {
+      list-style-type: disc;
+      padding-left: 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+    .prose-brief li {
+      margin-bottom: 0.3rem;
+    }
+    @media print {
+      .no-print {
+        display: none !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 flex flex-col h-screen overflow-hidden">
+
+  <!-- Top Studio Header & Multi-Provider Controls -->
+  <header class="bg-slate-900 text-white px-4 py-2.5 shadow-md z-30 shrink-0 no-print">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <!-- Brand -->
+      <div class="flex items-center gap-2.5">
+        <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+        <div>
+          <h1 class="text-sm font-bold tracking-tight leading-none">Heritage Statement Drafter</h1>
+          <span class="text-[10px] text-slate-400">NPPF &amp; Historic England GPA3 Automated Drafting Studio</span>
+        </div>
+      </div>
+
+      <!-- AI Engine Switcher -->
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="flex items-center gap-1.5 text-xs text-slate-300">
+          <span class="hidden sm:inline text-slate-400">Engine:</span>
+          <select
+            id="provider-select"
+            aria-label="Select AI provider"
+            class="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
+          >
+            <option value="ollama">Local Ollama (Private / Free)</option>
+            <option value="claude">Anthropic Claude (BYOK)</option>
+            <option value="openai">OpenAI / OpenRouter (BYOK)</option>
+          </select>
+        </label>
+
+        <select
+          id="model-select"
+          aria-label="Select model"
+          class="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none max-w-[180px]"
+        >
+          <option value="qwen2.5:3b">qwen2.5:3b</option>
+        </select>
+
+        <input
+          id="api-key-input"
+          type="password"
+          placeholder="API Key (stored in tab session)..."
+          aria-label="Provider API key"
+          class="hidden w-48 sm:w-56 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-white placeholder-slate-400 focus:border-emerald-500 focus:outline-none"
+        />
+
+        <button
+          id="endpoint-toggle-btn"
+          type="button"
+          title="Configure custom endpoint URL"
+          class="rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2 py-1.5 text-xs text-slate-300"
+        >
+          Endpoint
+        </button>
+
+        <a
+          href="https://github.com/portableant/heritage-constraints-screener"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Companion Heritage Constraints Screener"
+          class="hidden lg:inline-flex items-center gap-1 rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-xs text-slate-300"
+        >
+          Screener ↗
+        </a>
+      </div>
+    </div>
+
+    <!-- Collapsible Custom Endpoint Row -->
+    <div id="endpoint-bar" class="hidden mt-2 pt-2 border-t border-slate-800 flex flex-wrap items-center gap-2 text-xs">
+      <span class="text-slate-400">Custom API URL:</span>
+      <input
+        id="endpoint-input"
+        type="url"
+        placeholder="http://localhost:11434"
+        class="flex-1 min-w-[240px] rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-white focus:border-emerald-500 focus:outline-none"
+      />
+      <button
+        type="button"
+        id="refresh-ollama-btn"
+        class="rounded-md bg-slate-700 hover:bg-slate-600 px-2.5 py-1 text-xs text-white"
+      >
+        Refresh Local Models
+      </button>
+    </div>
+  </header>
+
+  <!-- Provider Status & CORS Help Bar -->
+  <div id="status-banner" class="bg-slate-800 text-slate-200 px-4 py-1.5 text-[11px] flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 shrink-0 no-print">
+    <div class="flex items-center gap-2">
+      <span id="status-dot" class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+      <span id="status-text">Checking local Ollama endpoint (http://localhost:11434)...</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <button
+        type="button"
+        id="toggle-cors-help-btn"
+        class="text-amber-300 hover:text-amber-200 underline"
+      >
+        GitHub Pages + Ollama Setup
+      </button>
+      <button
+        type="button"
+        id="copy-full-prompt-btn"
+        class="text-emerald-300 hover:text-emerald-200 font-semibold underline"
+      >
+        Copy Grounded Prompt for Any LLM
+      </button>
+    </div>
+  </div>
+
+  <!-- Collapsible Ollama GitHub Pages CORS Guide -->
+  <div id="cors-help-panel" class="hidden bg-amber-50 border-b border-amber-200 px-4 py-3 text-xs text-amber-950 shrink-0 no-print">
+    <div class="max-w-5xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div class="space-y-1">
+        <div class="font-bold">Running Local Ollama with GitHub Pages (HTTPS → localhost)</div>
+        <p class="text-[11px] text-amber-900">
+          Pull a lightweight model (<code class="bg-amber-100 px-1 rounded">ollama pull qwen2.5:3b</code>) and allow browser requests from GitHub Pages:
+        </p>
+        <div class="flex flex-wrap gap-2 text-[11px] font-mono pt-0.5">
+          <span class="bg-white border border-amber-200 rounded px-2 py-0.5"><strong>macOS:</strong> launchctl setenv OLLAMA_ORIGINS "*"</span>
+          <span class="bg-white border border-amber-200 rounded px-2 py-0.5"><strong>Linux/Win:</strong> OLLAMA_ORIGINS="*" ollama serve</span>
+        </div>
+      </div>
+      <button type="button" id="close-cors-help-btn" class="self-start sm:self-center rounded border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-medium">
+        Dismiss
+      </button>
+    </div>
+  </div>
+
+  <!-- 3-Pane Drafting Studio -->
+  <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 min-h-0 overflow-y-auto lg:overflow-hidden">
+
+    <!-- PANE 1: Spatial Intake & Proposal Context (4 cols) -->
+    <section class="lg:col-span-4 bg-white border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col lg:h-full lg:overflow-y-auto no-print">
+      <div class="p-4 space-y-4">
+        <div>
+          <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Step 1 · Spatial Evidence</span>
+          <h2 class="text-sm font-bold text-slate-900">Site &amp; Constraint Intake</h2>
+        </div>
+
+        <!-- Option A: Import GeoJSON from Heritage Constraints Screener -->
+        <div
+          id="geojson-dropzone"
+          class="rounded-lg border-2 border-dashed border-slate-300 hover:border-emerald-500 bg-slate-50 p-3 text-center transition-colors cursor-pointer"
+        >
+          <input id="geojson-file-input" type="file" accept=".json,.geojson" class="hidden" />
+          <div class="text-xs font-semibold text-slate-800">
+            Import Screener GeoJSON Export
+          </div>
+          <p class="text-[11px] text-slate-500 mt-0.5">
+            Drop a <code class="bg-slate-200/70 px-1 rounded">.geojson</code> exported from Heritage Constraints Screener, or click to browse
+          </p>
+        </div>
+
+        <!-- Option B: Direct Search or Sample Site -->
+        <div class="space-y-2">
+          <div class="text-[11px] font-semibold text-slate-600">Or Screen Directly via Historic England &amp; ADS:</div>
+          <form id="site-search-form" class="flex gap-1.5">
+            <input
+              id="site-search-input"
+              type="text"
+              placeholder="UK postcode, town, or lat, lon..."
+              class="flex-1 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs focus:border-emerald-600 focus:outline-none"
+            />
+            <select
+              id="buffer-select"
+              aria-label="Buffer radius"
+              class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs focus:border-emerald-600 focus:outline-none"
+            >
+              <option value="250">250 m</option>
+              <option value="500" selected>500 m</option>
+              <option value="1000">1,000 m</option>
+            </select>
+            <button
+              type="submit"
+              class="rounded-md bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white"
+            >
+              Screen
+            </button>
+          </form>
+
+          <select
+            id="sample-site-select"
+            aria-label="Load sample site"
+            class="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-emerald-600 focus:outline-none"
+          >
+            <option value="">Load sample site...</option>
+            <option value="berkhamsted">Berkhamsted Castle (Scheduled Monument &amp; Conservation Area)</option>
+            <option value="bath">Bath Spa Core (World Heritage Site &amp; Grade I)</option>
+            <option value="stonehenge">Stonehenge Environs (WHS &amp; Barrow Cemeteries)</option>
+            <option value="hadriansWall">Housesteads Roman Fort (Frontiers of the Roman Empire)</option>
+          </select>
+        </div>
+
+        <!-- Mini Locator Map -->
+        <div class="rounded-lg border border-slate-200 overflow-hidden h-44 relative bg-slate-200">
+          <div id="mini-map" class="w-full h-full"></div>
+          <div class="absolute bottom-1.5 left-1.5 bg-white/90 backdrop-blur-xs rounded px-2 py-0.5 text-[10px] text-slate-700 shadow-xs">
+            Click map to move site pin
+          </div>
+        </div>
+
+        <!-- Screened Evidence Summary Pill Bar -->
+        <div id="evidence-summary" class="rounded-lg bg-slate-50 border border-slate-200 p-3 text-xs space-y-1.5">
+          <div class="text-slate-500 text-center">No site screened yet.</div>
+        </div>
+
+        <hr class="border-slate-200" />
+
+        <!-- Step 2: Development Proposal Details -->
+        <div class="space-y-2.5">
+          <div>
+            <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Step 2 · Development Proposal</span>
+            <h2 class="text-sm font-bold text-slate-900">Project Parameters</h2>
+          </div>
+
+          <div>
+            <label for="proposal-title" class="block text-[11px] font-semibold text-slate-700 mb-1">Site / Project Name</label>
+            <input
+              id="proposal-title"
+              type="text"
+              placeholder="e.g. Land Rear of High Street, Berkhamsted"
+              class="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs focus:border-emerald-600 focus:outline-none"
+            />
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label for="proposal-type" class="block text-[11px] font-semibold text-slate-700 mb-1">Scheme Type</label>
+              <select
+                id="proposal-type"
+                class="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs focus:border-emerald-600 focus:outline-none"
+              >
+                <option value="Residential infill (1–9 dwellings)">Residential infill (1–9)</option>
+                <option value="Major residential / mixed-use">Major residential / mixed-use</option>
+                <option value="Alterations / extension to heritage asset">Alterations / extension</option>
+                <option value="Change of use / barn conversion">Barn / building conversion</option>
+                <option value="Renewable energy / solar PV / heat pump">Solar PV / Heat pump</option>
+                <option value="Infrastructure / utilities / highways">Infrastructure / utilities</option>
+              </select>
+            </div>
+            <div>
+              <label for="proposal-scale" class="block text-[11px] font-semibold text-slate-700 mb-1">Scale &amp; Massing</label>
+              <input
+                id="proposal-scale"
+                type="text"
+                placeholder="e.g. Two-storey, 8.2m ridge"
+                class="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs focus:border-emerald-600 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label for="proposal-notes" class="block text-[11px] font-semibold text-slate-700 mb-1">
+              Setting, Screening &amp; Materials Notes (Optional)
+            </label>
+            <textarea
+              id="proposal-notes"
+              rows="3"
+              placeholder="e.g. Mature boundary hedgerows screen ground-level views from the Conservation Area; traditional clay tiles and brick proposed..."
+              class="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs focus:border-emerald-600 focus:outline-none"
+            ></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PANE 2: Section-by-Section Generation Pipeline (3 cols) -->
+    <section class="lg:col-span-3 bg-slate-50 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col lg:h-full lg:overflow-y-auto no-print">
+      <div class="p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Step 3 · Synthesis</span>
+            <h2 class="text-sm font-bold text-slate-900">Statement Sections</h2>
+          </div>
+          <button
+            type="button"
+            id="draft-all-btn"
+            class="rounded-md bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors"
+          >
+            Draft Full Statement
+          </button>
+        </div>
+
+        <p class="text-[11px] text-slate-500 leading-relaxed">
+          Generates 4 concise passes so small local models (3B) stay fast and grounded. Regenerate any section individually after editing notes.
+        </p>
+
+        <div id="section-cards-list" class="space-y-2.5">
+          <!-- Populated dynamically by main.js -->
+        </div>
+
+        <!-- Citation Verification Auditor -->
+        <div class="pt-2">
+          <div class="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-bold uppercase tracking-wider text-slate-700">Citation Auditor</span>
+              <span id="audit-badge" class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                Awaiting draft
+              </span>
+            </div>
+            <div id="audit-details" class="text-[11px] text-slate-500 leading-relaxed">
+              Every NHLE List Entry number cited by the AI will be cross-checked against your screened ArcGIS/GeoJSON features.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PANE 3: Live Heritage Statement Document & Export (5 cols) -->
+    <section class="lg:col-span-5 bg-white flex flex-col lg:h-full min-h-[420px]">
+      <!-- Document Action Bar -->
+      <div class="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0 no-print">
+        <span class="text-xs font-bold uppercase tracking-wider text-slate-700">Draft Heritage Statement</span>
+        <div class="flex items-center gap-1.5">
+          <button
+            type="button"
+            id="export-md-btn"
+            class="rounded border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
+          >
+            Markdown
+          </button>
+          <button
+            type="button"
+            id="export-pdf-btn"
+            class="rounded border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
+          >
+            PDF
+          </button>
+          <button
+            type="button"
+            id="export-geojson-btn"
+            class="rounded border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
+          >
+            GeoJSON
+          </button>
+        </div>
+      </div>
+
+      <!-- Rendered Statement Document -->
+      <div id="document-scroll" class="flex-1 overflow-y-auto p-6 sm:p-8">
+        <article id="statement-preview" class="prose-brief max-w-2xl mx-auto text-xs sm:text-sm text-slate-800">
+          <div class="border border-dashed border-slate-300 rounded-xl p-8 text-center text-slate-500 space-y-2">
+            <div class="font-semibold text-slate-700">Ready to Draft</div>
+            <p class="text-xs">
+              Import a GeoJSON file from <strong>Heritage Constraints Screener</strong> or screen a UK postcode on the left, then click <strong>Draft Full Statement</strong>.
+            </p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+  </main>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

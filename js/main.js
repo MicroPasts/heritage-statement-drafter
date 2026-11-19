@@ -1,0 +1,595 @@
+import { SAMPLE_SITES } from './config/services.js';
+import { geocodeQuery } from './intake/geocoder.js';
+import { screenSiteDirectly } from './intake/arcgisClient.js';
+import { loadScreenerOrBoundaryGeoJSON } from './intake/geojsonLoader.js';
+import {
+  PROVIDERS,
+  fetchOllamaModels,
+  streamSectionCompletion,
+} from './llm/providerClient.js';
+import {
+  STATEMENT_SECTIONS,
+  buildGroundedContext,
+  buildSectionPrompt,
+} from './llm/sectionPrompts.js';
+import { auditDraftCitations } from './validation/citationAuditor.js';
+
+const studioState = {
+  screening: null, // { siteFeature, buffered, bufferMeters, assets, sensitivity }
+  drafts: {
+    context: '',
+    baseline: '',
+    setting: '',
+    archaeology_policy: '',
+  },
+  sectionStatus: {
+    context: 'idle',
+    baseline: 'idle',
+    setting: 'idle',
+    archaeology_policy: 'idle',
+  },
+  abortController: null,
+};
+
+// ---------------------------------------------------------------------------
+// 1. Mini Locator Map (MapLibre GL)
+// ---------------------------------------------------------------------------
+const miniMap = new maplibregl.Map({
+  container: 'mini-map',
+  style: {
+    version: 8,
+    sources: {
+      osm: {
+        type: 'raster',
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '&copy; OpenStreetMap',
+      },
+    },
+    layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+  },
+  center: [-0.5586, 51.7634],
+  zoom: 14,
+});
+
+miniMap.on('load', () => {
+  miniMap.addSource('studio-data', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+
+  miniMap.addLayer({
+    id: 'buffer-fill',
+    type: 'fill',
+    source: 'studio-data',
+    filter: ['==', ['get', '_role'], 'buffer'],
+    paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.1 },
+  });
+
+  miniMap.addLayer({
+    id: 'asset-points',
+    type: 'circle',
+    source: 'studio-data',
+    filter: ['==', ['get', '_role'], 'asset'],
+    paint: {
+      'circle-radius': 4.5,
+      'circle-color': ['coalesce', ['get', '_color'], '#d97706'],
+      'circle-stroke-width': 1,
+      'circle-stroke-color': '#ffffff',
+    },
+  });
+
+  miniMap.addLayer({
+    id: 'site-fill',
+    type: 'fill',
+    source: 'studio-data',
+    filter: ['all', ['==', ['get', '_role'], 'site'], ['==', ['geometry-type'], 'Polygon']],
+    paint: { 'fill-color': '#dc2626', 'fill-opacity': 0.25 },
+  });
+
+  miniMap.addLayer({
+    id: 'site-point',
+    type: 'circle',
+    source: 'studio-data',
+    filter: ['all', ['==', ['get', '_role'], 'site'], ['==', ['geometry-type'], 'Point']],
+    paint: {
+      'circle-radius': 6.5,
+      'circle-color': '#dc2626',
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#ffffff',
+    },
+  });
+});
+
+miniMap.on('click', async (e) => {
+  const pt = turf.point([e.lngLat.lng, e.lngLat.lat], {
+    label: `${e.lngLat.lat.toFixed(5)}, ${e.lngLat.lng.toFixed(5)}`,
+  });
+  const bufferMeters = Number(document.getElementById('buffer-select').value || 500);
+  await applyScreeningResult(await screenSiteDirectly(pt, bufferMeters));
+});
+
+function updateMiniMap(screening) {
+  if (!miniMap.isStyleLoaded() || !screening) return;
+
+  const features = [];
+  const siteClone = JSON.parse(JSON.stringify(screening.siteFeature));
+  siteClone.properties = { ...(siteClone.properties || {}), _role: 'site' };
+  features.push(siteClone);
+
+  if (screening.buffered) {
+    const bufClone = JSON.parse(JSON.stringify(screening.buffered));
+    bufClone.properties = { ...(bufClone.properties || {}), _role: 'buffer' };
+    features.push(bufClone);
+  }
+
+  for (const asset of screening.assets || []) {
+    const pt = turf.centroid(asset);
+    pt.properties = {
+      _role: 'asset',
+      _color: asset.properties?._color || '#d97706',
+    };
+    features.push(pt);
+  }
+
+  miniMap.getSource('studio-data')?.setData({
+    type: 'FeatureCollection',
+    features,
+  });
+
+  const center = turf.centroid(screening.siteFeature).geometry.coordinates;
+  miniMap.flyTo({ center, zoom: 14.5, duration: 700 });
+}
+
+// ---------------------------------------------------------------------------
+// 2. Spatial Evidence & Section Cards Rendering
+// ---------------------------------------------------------------------------
+async function applyScreeningResult(screening) {
+  studioState.screening = screening;
+  updateMiniMap(screening);
+
+  const titleInput = document.getElementById('proposal-title');
+  if (titleInput && !titleInput.value.trim() && screening.siteFeature.properties?.label) {
+    titleInput.value = screening.siteFeature.properties.label;
+  }
+
+  const designatedCount = screening.assets.filter(
+    (a) => a.properties?._layerId !== 'ads-records'
+  ).length;
+  const intersectingCount = screening.assets.filter(
+    (a) => a.properties?._layerId !== 'ads-records' && a.properties?._intersects
+  ).length;
+  const harCount = screening.assets.filter(
+    (a) => a.properties?._category === 'Heritage at Risk'
+  ).length;
+  const adsCount = screening.assets.filter(
+    (a) => a.properties?._layerId === 'ads-records'
+  ).length;
+
+  const summaryEl = document.getElementById('evidence-summary');
+  summaryEl.innerHTML = `
+    <div class="flex items-center justify-between">
+      <span class="font-bold text-slate-800 truncate">${screening.siteFeature.properties?.label || 'Screened Site'}</span>
+      <span class="rounded bg-amber-100 text-amber-900 px-1.5 py-0.5 text-[10px] font-semibold shrink-0">
+        ${screening.bufferMeters} m buffer
+      </span>
+    </div>
+    <div class="text-[11px] font-medium text-slate-700">Sensitivity: ${screening.sensitivity}</div>
+    <div class="grid grid-cols-4 gap-1 pt-1 text-center">
+      <div class="rounded bg-white border border-slate-200 p-1">
+        <div class="font-bold text-slate-900">${designatedCount}</div>
+        <div class="text-[9px] text-slate-500">NHLE</div>
+      </div>
+      <div class="rounded bg-white border border-slate-200 p-1">
+        <div class="font-bold text-rose-700">${intersectingCount}</div>
+        <div class="text-[9px] text-slate-500">On-Site</div>
+      </div>
+      <div class="rounded bg-white border border-slate-200 p-1">
+        <div class="font-bold text-amber-700">${harCount}</div>
+        <div class="text-[9px] text-slate-500">At Risk</div>
+      </div>
+      <div class="rounded bg-white border border-slate-200 p-1">
+        <div class="font-bold text-indigo-700">${adsCount}</div>
+        <div class="text-[9px] text-slate-500">ADS</div>
+      </div>
+    </div>
+  `;
+
+  refreshCitationAudit();
+}
+
+function renderSectionCards() {
+  const container = document.getElementById('section-cards-list');
+  container.innerHTML = STATEMENT_SECTIONS.map((sec) => {
+    const status = studioState.sectionStatus[sec.id];
+    const badgeMap = {
+      idle: '<span class="text-[10px] text-slate-400">Ready</span>',
+      streaming: '<span class="text-[10px] font-semibold text-emerald-600 animate-pulse">Drafting...</span>',
+      done: '<span class="text-[10px] font-semibold text-emerald-700">✓ Complete</span>',
+      error: '<span class="text-[10px] font-semibold text-rose-600">Error</span>',
+    };
+
+    return `
+      <div class="rounded-lg border border-slate-200 bg-white p-3 space-y-1.5 shadow-2xs">
+        <div class="flex items-start justify-between gap-2">
+          <div class="text-xs font-bold text-slate-800">${sec.title}</div>
+          ${badgeMap[status] || ''}
+        </div>
+        <p class="text-[11px] text-slate-500 leading-snug">${sec.description}</p>
+        <div class="pt-1 flex justify-end">
+          <button
+            type="button"
+            data-gen-section="${sec.id}"
+            class="rounded border border-slate-300 hover:border-emerald-600 hover:text-emerald-700 px-2 py-0.5 text-[11px] font-medium text-slate-700 transition-colors"
+          >
+            ${studioState.drafts[sec.id] ? 'Regenerate Section' : 'Draft Section'}
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  container.querySelectorAll('button[data-gen-section]').forEach((btn) => {
+    btn.addEventListener('click', () => generateSingleSection(btn.dataset.genSection));
+  });
+}
+
+function getProposalInputs() {
+  return {
+    title: document.getElementById('proposal-title')?.value || '',
+    type: document.getElementById('proposal-type')?.value || '',
+    scale: document.getElementById('proposal-scale')?.value || '',
+    notes: document.getElementById('proposal-notes')?.value || '',
+  };
+}
+
+function assembleFullMarkdown() {
+  const proposal = getProposalInputs();
+  const title =
+    proposal.title.trim() ||
+    studioState.screening?.siteFeature?.properties?.label ||
+    'Proposed Development Site';
+
+  const bodySections = STATEMENT_SECTIONS.map((s) => studioState.drafts[s.id]?.trim())
+    .filter(Boolean)
+    .join('\n\n---\n\n');
+
+  if (!bodySections) return '';
+
+  return [
+    `# Desk-Based Heritage Statement & Setting Assessment`,
+    `**Site:** ${title}  \n**Scheme:** ${proposal.type}  \n**Screening Buffer:** ${studioState.screening?.bufferMeters || 500} m  \n**Generated:** ${new Date().toLocaleDateString('en-GB')}`,
+    `---`,
+    bodySections,
+    `---`,
+    `*Contains Historic England Open Data © Historic England (OGL v3.0) and Archaeological Data Service metadata via DataCite. Drafted via Heritage Statement Drafter — verify all statutory designations prior to formal LPA submission.*`,
+  ].join('\n\n');
+}
+
+function updateDocumentPreview() {
+  const previewEl = document.getElementById('statement-preview');
+  const fullMd = assembleFullMarkdown();
+  if (!fullMd) return;
+
+  if (typeof window.marked?.parse === 'function') {
+    previewEl.innerHTML = window.marked.parse(fullMd);
+  } else {
+    previewEl.textContent = fullMd;
+  }
+
+  refreshCitationAudit();
+}
+
+function refreshCitationAudit() {
+  const fullMd = assembleFullMarkdown();
+  const badgeEl = document.getElementById('audit-badge');
+  const detailsEl = document.getElementById('audit-details');
+
+  if (!fullMd || !studioState.screening) {
+    badgeEl.textContent = 'Awaiting draft';
+    badgeEl.className = 'rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600';
+    return;
+  }
+
+  const audit = auditDraftCitations(fullMd, studioState.screening.assets);
+
+  if (audit.unverified.length > 0) {
+    badgeEl.textContent = `${audit.unverified.length} Unverified ID`;
+    badgeEl.className = 'rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-700';
+    detailsEl.innerHTML = `<span class="text-rose-700 font-semibold">Warning:</span> List Entry ID(s) <code>${audit.unverified.join(', ')}</code> were not found in the screened dataset. Regenerate or verify manually.`;
+  } else if (audit.citedCount > 0) {
+    badgeEl.textContent = `${audit.verified.length} Verified`;
+    badgeEl.className = 'rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800';
+    detailsEl.textContent = `All ${audit.verified.length} cited NHLE List Entry number(s) match your screened Historic England records.`;
+  } else {
+    badgeEl.textContent = 'No IDs cited yet';
+    badgeEl.className = 'rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600';
+    detailsEl.textContent = `${audit.totalAvailableInBuffer} NHLE List Entry record(s) available in buffer.`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Multi-Provider LLM Orchestration
+// ---------------------------------------------------------------------------
+const providerSelect = document.getElementById('provider-select');
+const modelSelect = document.getElementById('model-select');
+const apiKeyInput = document.getElementById('api-key-input');
+const endpointInput = document.getElementById('endpoint-input');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+let providerProbeId = 0;
+
+async function syncProviderUI() {
+  const currentProbe = ++providerProbeId;
+  const providerId = providerSelect.value;
+  const cfg = PROVIDERS[providerId];
+
+  apiKeyInput.classList.toggle('hidden', !cfg.requiresKey);
+  endpointInput.value = cfg.defaultEndpoint;
+
+  if (cfg.requiresKey) {
+    apiKeyInput.value = sessionStorage.getItem(`hsd_key_${providerId}`) || '';
+  }
+
+  modelSelect.innerHTML = cfg.defaultModels
+    .map((m) => `<option value="${m}">${m}</option>`)
+    .join('');
+
+  if (providerId === 'ollama') {
+    statusDot.className = 'inline-block w-2 h-2 rounded-full bg-amber-400';
+    statusText.textContent = 'Probing local Ollama at http://localhost:11434...';
+    try {
+      const localModels = await fetchOllamaModels(endpointInput.value);
+      if (currentProbe !== providerProbeId) return;
+
+      if (localModels.length > 0) {
+        modelSelect.innerHTML = localModels
+          .map((m) => `<option value="${m}">${m}</option>`)
+          .join('');
+        statusDot.className = 'inline-block w-2 h-2 rounded-full bg-emerald-400';
+        statusText.textContent = `Local Ollama connected (${localModels.length} model${localModels.length === 1 ? '' : 's'} ready)`;
+      } else {
+        statusDot.className = 'inline-block w-2 h-2 rounded-full bg-amber-400';
+        statusText.textContent = 'Ollama running, no models pulled yet (run: ollama pull qwen2.5:3b)';
+      }
+    } catch {
+      if (currentProbe !== providerProbeId) return;
+      statusDot.className = 'inline-block w-2 h-2 rounded-full bg-rose-400';
+      statusText.textContent = 'Local Ollama not detected — click "GitHub Pages + Ollama Setup" or switch to Claude/OpenAI';
+    }
+  } else {
+    statusDot.className = 'inline-block w-2 h-2 rounded-full bg-emerald-400';
+    statusText.textContent = `${cfg.label} selected — key stays strictly in browser sessionStorage`;
+  }
+}
+
+providerSelect.addEventListener('change', syncProviderUI);
+
+apiKeyInput.addEventListener('input', () => {
+  const providerId = providerSelect.value;
+  sessionStorage.setItem(`hsd_key_${providerId}`, apiKeyInput.value);
+});
+
+document.getElementById('endpoint-toggle-btn').addEventListener('click', () => {
+  document.getElementById('endpoint-bar').classList.toggle('hidden');
+});
+
+document.getElementById('refresh-ollama-btn').addEventListener('click', syncProviderUI);
+
+document.getElementById('toggle-cors-help-btn').addEventListener('click', () => {
+  document.getElementById('cors-help-panel').classList.toggle('hidden');
+});
+
+document.getElementById('close-cors-help-btn').addEventListener('click', () => {
+  document.getElementById('cors-help-panel').classList.add('hidden');
+});
+
+async function generateSingleSection(sectionId) {
+  if (!studioState.screening) {
+    alert('Please screen a site or import a GeoJSON file first.');
+    return;
+  }
+
+  const grounded = buildGroundedContext(studioState.screening, getProposalInputs());
+  const { systemPrompt, userPrompt } = buildSectionPrompt(sectionId, grounded);
+
+  studioState.drafts[sectionId] = '';
+  studioState.sectionStatus[sectionId] = 'streaming';
+  renderSectionCards();
+
+  const controller = new AbortController();
+  studioState.abortController = controller;
+
+  try {
+    await streamSectionCompletion({
+      provider: providerSelect.value,
+      model: modelSelect.value,
+      apiKey: apiKeyInput.value,
+      endpoint: endpointInput.value,
+      systemPrompt,
+      userPrompt,
+      signal: controller.signal,
+      onToken: (token) => {
+        studioState.drafts[sectionId] += token;
+        updateDocumentPreview();
+      },
+    });
+    studioState.sectionStatus[sectionId] = 'done';
+  } catch (err) {
+    studioState.sectionStatus[sectionId] = 'error';
+    studioState.drafts[sectionId] = `> **Generation Error (${sectionId}):** ${err.message}`;
+    updateDocumentPreview();
+  } finally {
+    renderSectionCards();
+  }
+}
+
+document.getElementById('draft-all-btn').addEventListener('click', async () => {
+  if (!studioState.screening) {
+    alert('Please screen a site or import a GeoJSON file first.');
+    return;
+  }
+  const btn = document.getElementById('draft-all-btn');
+  btn.disabled = true;
+  btn.textContent = 'Drafting...';
+
+  try {
+    for (const sec of STATEMENT_SECTIONS) {
+      await generateSingleSection(sec.id);
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Draft Full Statement';
+  }
+});
+
+// Copy full grounded prompt for pasting into any external LLM
+document.getElementById('copy-full-prompt-btn').addEventListener('click', async () => {
+  if (!studioState.screening) {
+    alert('Screen a site first to build a grounded prompt.');
+    return;
+  }
+  const grounded = buildGroundedContext(studioState.screening, getProposalInputs());
+  const promptText = [
+    'You are a senior UK heritage planning consultant drafting a Desk-Based Heritage Statement under the National Planning Policy Framework (NPPF, August 2026) and Historic England GPA3 (The Setting of Heritage Assets). Use ONLY the verified JSON facts below and cite exact List Entry numbers and distances in metres.',
+    '',
+    '```json',
+    JSON.stringify(grounded, null, 2),
+    '```',
+  ].join('\n');
+
+  await navigator.clipboard.writeText(promptText);
+  const btn = document.getElementById('copy-full-prompt-btn');
+  const orig = btn.textContent;
+  btn.textContent = 'Copied Grounded Prompt!';
+  setTimeout(() => {
+    btn.textContent = orig;
+  }, 2000);
+});
+
+// ---------------------------------------------------------------------------
+// 4. Intake Event Listeners (GeoJSON Dropzone, Search & Samples)
+// ---------------------------------------------------------------------------
+const dropzone = document.getElementById('geojson-dropzone');
+const fileInput = document.getElementById('geojson-file-input');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropzone.classList.add('border-emerald-500', 'bg-emerald-50');
+});
+dropzone.addEventListener('dragleave', () => {
+  dropzone.classList.remove('border-emerald-500', 'bg-emerald-50');
+});
+dropzone.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('border-emerald-500', 'bg-emerald-50');
+  const file = e.dataTransfer?.files?.[0];
+  if (!file) return;
+  try {
+    const bufferMeters = Number(document.getElementById('buffer-select').value || 500);
+    const result = await loadScreenerOrBoundaryGeoJSON(await file.text(), bufferMeters);
+    await applyScreeningResult(result);
+  } catch (err) {
+    alert(`GeoJSON import failed: ${err.message}`);
+  }
+});
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const bufferMeters = Number(document.getElementById('buffer-select').value || 500);
+    const result = await loadScreenerOrBoundaryGeoJSON(await file.text(), bufferMeters);
+    await applyScreeningResult(result);
+  } catch (err) {
+    alert(`GeoJSON import failed: ${err.message}`);
+  }
+});
+
+document.getElementById('site-search-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const query = document.getElementById('site-search-input').value.trim();
+  if (!query) return;
+  const bufferMeters = Number(document.getElementById('buffer-select').value || 500);
+  try {
+    const pt = await geocodeQuery(query);
+    await applyScreeningResult(await screenSiteDirectly(pt, bufferMeters));
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+document.getElementById('sample-site-select').addEventListener('change', async (e) => {
+  const sample = SAMPLE_SITES[e.target.value];
+  if (!sample) return;
+  const bufferMeters = Number(document.getElementById('buffer-select').value || 500);
+  const pt = turf.point(sample.center, { label: sample.label });
+  await applyScreeningResult(await screenSiteDirectly(pt, bufferMeters));
+});
+
+// ---------------------------------------------------------------------------
+// 5. Document Exports (Markdown, PDF & Screener-Compatible GeoJSON)
+// ---------------------------------------------------------------------------
+document.getElementById('export-md-btn').addEventListener('click', () => {
+  const md = assembleFullMarkdown();
+  if (!md) return alert('Draft at least one section before exporting.');
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `heritage-statement-${Date.now()}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById('export-pdf-btn').addEventListener('click', () => {
+  const md = assembleFullMarkdown();
+  if (!md) return alert('Draft at least one section before exporting.');
+  const el = document.getElementById('statement-preview');
+  window
+    .html2pdf()
+    .set({
+      margin: [14, 14, 14, 14],
+      filename: `heritage-statement-${Date.now()}.pdf`,
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+    })
+    .from(el)
+    .save();
+});
+
+document.getElementById('export-geojson-btn').addEventListener('click', () => {
+  if (!studioState.screening) return alert('No screened site data to export.');
+  const { siteFeature, buffered, bufferMeters, assets } = studioState.screening;
+
+  const siteOut = JSON.parse(JSON.stringify(siteFeature));
+  siteOut.properties = { ...(siteOut.properties || {}), _role: 'site', bufferMeters };
+
+  const bufOut = JSON.parse(JSON.stringify(buffered));
+  bufOut.properties = { ...(bufOut.properties || {}), _role: 'buffer', bufferMeters };
+
+  const fc = {
+    type: 'FeatureCollection',
+    features: [siteOut, bufOut, ...(assets || [])],
+  };
+
+  const blob = new Blob([JSON.stringify(fc, null, 2)], { type: 'application/geo+json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `heritage-constraints-${Date.now()}.geojson`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------------------------------------------------------------------
+// Initialize Studio
+// ---------------------------------------------------------------------------
+renderSectionCards();
+syncProviderUI();
+miniMap.once('load', async () => {
+  const defaultSample = SAMPLE_SITES.berkhamsted;
+  const pt = turf.point(defaultSample.center, { label: defaultSample.label });
+  await applyScreeningResult(await screenSiteDirectly(pt, 500));
+});
