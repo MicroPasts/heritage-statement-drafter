@@ -1,6 +1,6 @@
-import { SAMPLE_SITES } from './config/services.js';
+import { SAMPLE_SITES, HERITAGE_LAYERS } from './config/services.js';
 import { geocodeQuery } from './intake/geocoder.js';
-import { screenSiteDirectly } from './intake/arcgisClient.js';
+import { screenSiteDirectly, normalizeAssetMeta } from './intake/arcgisClient.js';
 import { loadScreenerOrBoundaryGeoJSON } from './intake/geojsonLoader.js';
 import {
   PROVIDERS,
@@ -31,8 +31,63 @@ const studioState = {
   abortController: null,
 };
 
+let activePopup = null;
+
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildAssetPopupHtml(props) {
+  const meta = normalizeAssetMeta({ properties: props });
+  const badgeColor = props._color || '#d97706';
+
+  const distanceText = meta.intersects
+    ? '<span class="text-rose-700 font-semibold">Intersects Site</span>'
+    : meta.distanceMeters !== null
+      ? `${meta.distanceMeters} m from site`
+      : '';
+
+  const gradeOrType = meta.grade
+    ? `<span class="font-semibold">${escapeHtml(meta.grade)}</span>`
+    : meta.reportType
+      ? `<span>${escapeHtml(meta.reportType)}</span>`
+      : '';
+
+  const entryRow = meta.listEntry
+    ? `<div class="text-[11px] text-slate-600">ID / List Entry: <span class="font-mono font-semibold">${escapeHtml(meta.listEntry)}</span></div>`
+    : '';
+
+  const conditionRow = meta.condition
+    ? `<div class="text-[11px] text-rose-700">Condition: ${escapeHtml(meta.condition)}</div>`
+    : '';
+
+  const linkRow = meta.hyperlink
+    ? `<div class="pt-1"><a href="${escapeHtml(meta.hyperlink)}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-semibold text-emerald-700 hover:underline">Open Official Record ↗</a></div>`
+    : '';
+
+  return `
+    <div class="text-xs text-slate-900 space-y-1 max-w-[240px]">
+      <div class="inline-block rounded px-1.5 py-0.5 text-[10px] font-bold text-white" style="background-color:${escapeHtml(badgeColor)}">
+        ${escapeHtml(meta.category)}
+      </div>
+      <div class="font-bold leading-snug text-slate-900">${escapeHtml(meta.name)}</div>
+      <div class="flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
+        ${gradeOrType}
+        ${distanceText ? `<span>• ${distanceText}</span>` : ''}
+      </div>
+      ${entryRow}
+      ${conditionRow}
+      ${linkRow}
+    </div>
+  `;
+}
+
 // ---------------------------------------------------------------------------
-// 1. Mini Locator Map (MapLibre GL)
+// 1. Locator Map (MapLibre GL — Polygons, Clickable Dots & Info Popups)
 // ---------------------------------------------------------------------------
 const miniMap = new maplibregl.Map({
   container: 'mini-map',
@@ -52,39 +107,103 @@ const miniMap = new maplibregl.Map({
   zoom: 14,
 });
 
+miniMap.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+
 miniMap.on('load', () => {
   miniMap.addSource('studio-data', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
   });
 
+  // Screening buffer ring
   miniMap.addLayer({
     id: 'buffer-fill',
     type: 'fill',
     source: 'studio-data',
     filter: ['==', ['get', '_role'], 'buffer'],
-    paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.1 },
+    paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.08 },
   });
 
   miniMap.addLayer({
-    id: 'asset-points',
-    type: 'circle',
+    id: 'buffer-line',
+    type: 'line',
     source: 'studio-data',
-    filter: ['==', ['get', '_role'], 'asset'],
+    filter: ['==', ['get', '_role'], 'buffer'],
+    paint: { 'line-color': '#2563eb', 'line-width': 1.25, 'line-dasharray': [3, 2] },
+  });
+
+  // Designated polygon assets (WHS, Battlefields, Scheduled Monuments, Parks & Gardens, Conservation Areas)
+  miniMap.addLayer({
+    id: 'asset-polygons-fill',
+    type: 'fill',
+    source: 'studio-data',
+    filter: [
+      'all',
+      ['==', ['get', '_role'], 'asset'],
+      ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]],
+    ],
     paint: {
-      'circle-radius': 4.5,
-      'circle-color': ['coalesce', ['get', '_color'], '#d97706'],
-      'circle-stroke-width': 1,
-      'circle-stroke-color': '#ffffff',
+      'fill-color': ['coalesce', ['get', '_color'], '#0d9488'],
+      'fill-opacity': 0.14,
     },
   });
 
   miniMap.addLayer({
+    id: 'asset-polygons-line',
+    type: 'line',
+    source: 'studio-data',
+    filter: [
+      'all',
+      ['==', ['get', '_role'], 'asset'],
+      ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]],
+    ],
+    paint: {
+      'line-color': ['coalesce', ['get', '_color'], '#0d9488'],
+      'line-width': 1.75,
+    },
+  });
+
+  // Point / centroid markers for all screened assets (Listed Buildings, HAR, ADS, and polygon centroids)
+  miniMap.addLayer({
+    id: 'asset-points',
+    type: 'circle',
+    source: 'studio-data',
+    filter: [
+      'all',
+      ['==', ['get', '_role'], 'asset'],
+      ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]],
+    ],
+    paint: {
+      'circle-radius': 5.5,
+      'circle-color': ['coalesce', ['get', '_color'], '#d97706'],
+      'circle-stroke-width': 1.5,
+      'circle-stroke-color': '#ffffff',
+    },
+  });
+
+  // Screened red-line site boundary or pin
+  miniMap.addLayer({
     id: 'site-fill',
     type: 'fill',
     source: 'studio-data',
-    filter: ['all', ['==', ['get', '_role'], 'site'], ['==', ['geometry-type'], 'Polygon']],
+    filter: [
+      'all',
+      ['==', ['get', '_role'], 'site'],
+      ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]],
+    ],
     paint: { 'fill-color': '#dc2626', 'fill-opacity': 0.25 },
+  });
+
+  miniMap.addLayer({
+    id: 'site-line',
+    type: 'line',
+    source: 'studio-data',
+    filter: [
+      'all',
+      ['==', ['get', '_role'], 'site'],
+      ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]],
+    ],
+    paint: { 'line-color': '#dc2626', 'line-width': 2 },
   });
 
   miniMap.addLayer({
@@ -93,15 +212,48 @@ miniMap.on('load', () => {
     source: 'studio-data',
     filter: ['all', ['==', ['get', '_role'], 'site'], ['==', ['geometry-type'], 'Point']],
     paint: {
-      'circle-radius': 6.5,
+      'circle-radius': 7,
       'circle-color': '#dc2626',
       'circle-stroke-width': 2,
       'circle-stroke-color': '#ffffff',
     },
   });
+
+  // Pointer cursor over interactive asset dots and polygons
+  const interactiveLayers = ['asset-points', 'asset-polygons-fill'];
+  for (const layerId of interactiveLayers) {
+    miniMap.on('mouseenter', layerId, () => {
+      miniMap.getCanvas().style.cursor = 'pointer';
+    });
+    miniMap.on('mouseleave', layerId, () => {
+      miniMap.getCanvas().style.cursor = '';
+    });
+  }
 });
 
 miniMap.on('click', async (e) => {
+  // 1. Check if the user clicked an existing heritage asset dot or polygon first
+  const hitFeatures = miniMap.queryRenderedFeatures(e.point, {
+    layers: ['asset-points', 'asset-polygons-fill'].filter((id) => miniMap.getLayer(id)),
+  });
+
+  if (hitFeatures.length > 0) {
+    const topHit = hitFeatures[0];
+    const coords =
+      topHit.geometry.type === 'Point'
+        ? topHit.geometry.coordinates.slice()
+        : [e.lngLat.lng, e.lngLat.lat];
+
+    activePopup?.remove();
+    activePopup = new maplibregl.Popup({ offset: 10, maxWidth: '260px' })
+      .setLngLat(coords)
+      .setHTML(buildAssetPopupHtml(topHit.properties))
+      .addTo(miniMap);
+    return;
+  }
+
+  // 2. Otherwise move the site pin and run a fresh screening
+  activePopup?.remove();
   const pt = turf.point([e.lngLat.lng, e.lngLat.lat], {
     label: `${e.lngLat.lat.toFixed(5)}, ${e.lngLat.lng.toFixed(5)}`,
   });
@@ -124,12 +276,27 @@ function updateMiniMap(screening) {
   }
 
   for (const asset of screening.assets || []) {
-    const pt = turf.centroid(asset);
-    pt.properties = {
-      _role: 'asset',
-      _color: asset.properties?._color || '#d97706',
-    };
-    features.push(pt);
+    if (!asset.geometry) continue;
+    const isPolygon =
+      asset.geometry.type === 'Polygon' || asset.geometry.type === 'MultiPolygon';
+
+    if (isPolygon) {
+      // Render actual polygon boundary (WHS, Battlefields, Scheduled Monuments, Parks, Conservation Areas)
+      const polyClone = JSON.parse(JSON.stringify(asset));
+      polyClone.properties = {
+        ...(polyClone.properties || {}),
+        _role: 'asset',
+      };
+      features.push(polyClone);
+    } else {
+      // Render clickable dot for point assets (Listed Buildings, Heritage at Risk, ADS reports)
+      const ptClone = JSON.parse(JSON.stringify(asset));
+      ptClone.properties = {
+        ...(ptClone.properties || {}),
+        _role: 'asset',
+      };
+      features.push(ptClone);
+    }
   }
 
   miniMap.getSource('studio-data')?.setData({
@@ -166,15 +333,24 @@ async function applyScreeningResult(screening) {
     (a) => a.properties?._layerId === 'ads-records'
   ).length;
 
+  const legendItemsHtml = HERITAGE_LAYERS.map(
+    (l) => `
+      <span class="inline-flex items-center gap-1 text-[10px] text-slate-600">
+        <span class="inline-block w-2 h-2 rounded-full shrink-0" style="background-color:${l.color}"></span>
+        ${l.category}
+      </span>
+    `
+  ).join('');
+
   const summaryEl = document.getElementById('evidence-summary');
   summaryEl.innerHTML = `
-    <div class="flex items-center justify-between">
-      <span class="font-bold text-slate-800 truncate">${screening.siteFeature.properties?.label || 'Screened Site'}</span>
+    <div class="flex items-center justify-between gap-2">
+      <span class="font-bold text-slate-800 truncate">${escapeHtml(screening.siteFeature.properties?.label || 'Screened Site')}</span>
       <span class="rounded bg-amber-100 text-amber-900 px-1.5 py-0.5 text-[10px] font-semibold shrink-0">
         ${screening.bufferMeters} m buffer
       </span>
     </div>
-    <div class="text-[11px] font-medium text-slate-700">Sensitivity: ${screening.sensitivity}</div>
+    <div class="text-[11px] font-medium text-slate-700">Sensitivity: ${escapeHtml(screening.sensitivity)}</div>
     <div class="grid grid-cols-4 gap-1 pt-1 text-center">
       <div class="rounded bg-white border border-slate-200 p-1">
         <div class="font-bold text-slate-900">${designatedCount}</div>
@@ -192,6 +368,13 @@ async function applyScreeningResult(screening) {
         <div class="font-bold text-indigo-700">${adsCount}</div>
         <div class="text-[9px] text-slate-500">ADS</div>
       </div>
+    </div>
+    <div class="pt-1.5 border-t border-slate-200/80 flex flex-wrap gap-x-2.5 gap-y-1">
+      ${legendItemsHtml}
+      <span class="inline-flex items-center gap-1 text-[10px] text-slate-600">
+        <span class="inline-block w-2 h-2 rounded-full shrink-0" style="background-color:#4f46e5"></span>
+        ADS Reports
+      </span>
     </div>
   `;
 

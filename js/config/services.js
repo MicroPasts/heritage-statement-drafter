@@ -8,25 +8,25 @@ export const HERITAGE_LAYERS = [
   {
     id: 'scheduled-monuments',
     category: 'Scheduled Monuments',
-    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/1',
+    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/6',
     color: '#dc2626',
   },
   {
     id: 'parks-gardens',
     category: 'Registered Parks & Gardens',
-    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/2',
+    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/7',
     color: '#16a34a',
   },
   {
     id: 'battlefields',
     category: 'Registered Battlefields',
-    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/3',
+    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/8',
     color: '#9333ea',
   },
   {
     id: 'world-heritage-sites',
     category: 'World Heritage Sites',
-    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/4',
+    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/10',
     color: '#2563eb',
   },
   {
@@ -38,7 +38,7 @@ export const HERITAGE_LAYERS = [
   {
     id: 'heritage-at-risk',
     category: 'Heritage at Risk',
-    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/Heritage_at_Risk/FeatureServer/0',
+    url: 'https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/Historic_England_Heritage_at_Risk_Register_2022/FeatureServer/0',
     color: '#e11d48',
   },
 ];
