@@ -22,10 +22,26 @@ export const PROVIDERS = {
   },
 };
 
+export function isSafariBrowser() {
+  const ua = navigator.userAgent || '';
+  return /Safari/i.test(ua) && !/Chrome|Chromium|Edg|Firefox|OPR|Brave/i.test(ua);
+}
+
 export async function fetchOllamaModels(baseUrl = PROVIDERS.ollama.defaultEndpoint) {
   const cleanUrl = baseUrl.replace(/\/$/, '');
+
+  if (
+    window.location.protocol === 'https:' &&
+    cleanUrl.startsWith('http://') &&
+    isSafariBrowser()
+  ) {
+    throw new Error(
+      'Safari blocks http://localhost from HTTPS GitHub Pages — open in Chrome or Firefox'
+    );
+  }
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2500);
+  const timeoutId = setTimeout(() => controller.abort(), 3000);
 
   try {
     const res = await fetch(`${cleanUrl}/api/tags`, {
@@ -34,13 +50,19 @@ export async function fetchOllamaModels(baseUrl = PROVIDERS.ollama.defaultEndpoi
       signal: controller.signal,
     });
 
+    if (res.status === 403) {
+      throw new Error(
+        'CORS rejected (HTTP 403) — run launchctl setenv OLLAMA_ORIGINS "*" and restart Ollama'
+      );
+    }
+
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      throw new Error(`Ollama returned HTTP ${res.status}`);
     }
 
     const data = await res.json();
     if (!data || !Array.isArray(data.models)) {
-      throw new Error('Response is not a valid Ollama /api/tags payload');
+      throw new Error('Unexpected response from port 11434 (not an Ollama /api/tags payload)');
     }
 
     const names = data.models
@@ -58,6 +80,16 @@ export async function fetchOllamaModels(baseUrl = PROVIDERS.ollama.defaultEndpoi
     });
 
     return names;
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Timed out after 3s trying to reach ${cleanUrl}`);
+    }
+    if (err instanceof TypeError) {
+      throw new Error(
+        `Network/CORS blocked reaching ${cleanUrl} — check Ollama is running, OLLAMA_ORIGINS is set, and Local Network Access is allowed`
+      );
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -109,22 +141,39 @@ export async function streamSectionCompletion({
 }
 
 async function streamOllama({ baseUrl, model, systemPrompt, userPrompt, signal, onToken }) {
-  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    signal,
-    body: JSON.stringify({
-      model,
-      stream: true,
-      options: { num_ctx: 4096, temperature: 0.2 },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-  });
+  const cleanUrl = baseUrl.replace(/\/$/, '');
+  let res;
 
-  if (!res.ok) throw new Error(`Ollama returned HTTP ${res.status}`);
+  try {
+    res = await fetch(`${cleanUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal,
+      body: JSON.stringify({
+        model,
+        stream: true,
+        options: { num_ctx: 4096, temperature: 0.2 },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+    });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(
+        `Browser blocked POST to ${cleanUrl}/api/chat — check OLLAMA_ORIGINS and Local Network Access permission`
+      );
+    }
+    throw err;
+  }
+
+  if (res.status === 403) {
+    throw new Error('Ollama rejected Origin (HTTP 403) — set OLLAMA_ORIGINS="*" and restart Ollama');
+  }
+  if (!res.ok) {
+    throw new Error(`Ollama returned HTTP ${res.status}`);
+  }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();

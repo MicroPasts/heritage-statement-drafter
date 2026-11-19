@@ -163,7 +163,7 @@ miniMap.on('load', () => {
     },
   });
 
-  // Point / centroid markers for all screened assets (Listed Buildings, HAR, ADS, and polygon centroids)
+  // Point markers for point assets (Listed Buildings, Heritage at Risk, ADS reports)
   miniMap.addLayer({
     id: 'asset-points',
     type: 'circle',
@@ -277,26 +277,12 @@ function updateMiniMap(screening) {
 
   for (const asset of screening.assets || []) {
     if (!asset.geometry) continue;
-    const isPolygon =
-      asset.geometry.type === 'Polygon' || asset.geometry.type === 'MultiPolygon';
-
-    if (isPolygon) {
-      // Render actual polygon boundary (WHS, Battlefields, Scheduled Monuments, Parks, Conservation Areas)
-      const polyClone = JSON.parse(JSON.stringify(asset));
-      polyClone.properties = {
-        ...(polyClone.properties || {}),
-        _role: 'asset',
-      };
-      features.push(polyClone);
-    } else {
-      // Render clickable dot for point assets (Listed Buildings, Heritage at Risk, ADS reports)
-      const ptClone = JSON.parse(JSON.stringify(asset));
-      ptClone.properties = {
-        ...(ptClone.properties || {}),
-        _role: 'asset',
-      };
-      features.push(ptClone);
-    }
+    const assetClone = JSON.parse(JSON.stringify(asset));
+    assetClone.properties = {
+      ...(assetClone.properties || {}),
+      _role: 'asset',
+    };
+    features.push(assetClone);
   }
 
   miniMap.getSource('studio-data')?.setData({
@@ -492,7 +478,7 @@ function refreshCitationAudit() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Multi-Provider LLM Orchestration
+// 3. Multi-Provider LLM Orchestration & Detailed Ollama Diagnostics
 // ---------------------------------------------------------------------------
 const providerSelect = document.getElementById('provider-select');
 const modelSelect = document.getElementById('model-select');
@@ -502,13 +488,15 @@ const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
 let providerProbeId = 0;
 
-async function syncProviderUI() {
+async function syncProviderUI(preserveCustomEndpoint = false) {
   const currentProbe = ++providerProbeId;
   const providerId = providerSelect.value;
   const cfg = PROVIDERS[providerId];
 
   apiKeyInput.classList.toggle('hidden', !cfg.requiresKey);
-  endpointInput.value = cfg.defaultEndpoint;
+  if (!preserveCustomEndpoint || !endpointInput.value.trim()) {
+    endpointInput.value = cfg.defaultEndpoint;
+  }
 
   if (cfg.requiresKey) {
     apiKeyInput.value = sessionStorage.getItem(`hsd_key_${providerId}`) || '';
@@ -519,10 +507,11 @@ async function syncProviderUI() {
     .join('');
 
   if (providerId === 'ollama') {
+    const targetUrl = endpointInput.value.trim() || cfg.defaultEndpoint;
     statusDot.className = 'inline-block w-2 h-2 rounded-full bg-amber-400';
-    statusText.textContent = 'Probing local Ollama at http://localhost:11434...';
+    statusText.textContent = `Probing local Ollama at ${targetUrl}...`;
     try {
-      const localModels = await fetchOllamaModels(endpointInput.value);
+      const localModels = await fetchOllamaModels(targetUrl);
       if (currentProbe !== providerProbeId) return;
 
       if (localModels.length > 0) {
@@ -533,12 +522,14 @@ async function syncProviderUI() {
         statusText.textContent = `Local Ollama connected (${localModels.length} model${localModels.length === 1 ? '' : 's'} ready)`;
       } else {
         statusDot.className = 'inline-block w-2 h-2 rounded-full bg-amber-400';
-        statusText.textContent = 'Ollama running, no models pulled yet (run: ollama pull qwen2.5:3b)';
+        statusText.textContent = 'Ollama connected, but no models installed (run: ollama pull qwen2.5:3b)';
       }
-    } catch {
+    } catch (err) {
       if (currentProbe !== providerProbeId) return;
+      console.warn('[Heritage Statement Drafter] Ollama probe failed:', err);
       statusDot.className = 'inline-block w-2 h-2 rounded-full bg-rose-400';
-      statusText.textContent = 'Local Ollama not detected — click "GitHub Pages + Ollama Setup" or switch to Claude/OpenAI';
+      statusText.textContent = `Ollama unreachable: ${err.message}`;
+      document.getElementById('cors-help-panel')?.classList.remove('hidden');
     }
   } else {
     statusDot.className = 'inline-block w-2 h-2 rounded-full bg-emerald-400';
@@ -546,7 +537,7 @@ async function syncProviderUI() {
   }
 }
 
-providerSelect.addEventListener('change', syncProviderUI);
+providerSelect.addEventListener('change', () => syncProviderUI(false));
 
 apiKeyInput.addEventListener('input', () => {
   const providerId = providerSelect.value;
@@ -557,7 +548,7 @@ document.getElementById('endpoint-toggle-btn').addEventListener('click', () => {
   document.getElementById('endpoint-bar').classList.toggle('hidden');
 });
 
-document.getElementById('refresh-ollama-btn').addEventListener('click', syncProviderUI);
+document.getElementById('refresh-ollama-btn').addEventListener('click', () => syncProviderUI(true));
 
 document.getElementById('toggle-cors-help-btn').addEventListener('click', () => {
   document.getElementById('cors-help-panel').classList.toggle('hidden');
@@ -770,7 +761,7 @@ document.getElementById('export-geojson-btn').addEventListener('click', () => {
 // Initialize Studio
 // ---------------------------------------------------------------------------
 renderSectionCards();
-syncProviderUI();
+syncProviderUI(false);
 miniMap.once('load', async () => {
   const defaultSample = SAMPLE_SITES.berkhamsted;
   const pt = turf.point(defaultSample.center, { label: defaultSample.label });
